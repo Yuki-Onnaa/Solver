@@ -1,0 +1,639 @@
+import tkinter as tk
+from tkinter import ttk, scrolledtext, filedialog, messagebox
+import threading
+import json
+import urllib.request
+import urllib.error
+import os
+import datetime
+import socket
+import base64
+
+# Paste your Gemini API key below between the quotes
+API_KEY = "AIzaSyAZ7pcju7NpFoEgo615Hi-Eq8mlBEcn98Q"
+
+# Admin password for the dashboard
+ADMIN_PASSWORD = "2612#Yuki"
+
+# Files
+LOG_FILE = "access_log.json"
+BAN_FILE = "banned_ips.json"
+SETTINGS_FILE = "settings.json"
+
+def get_my_ip():
+    try:
+        return socket.gethostbyname(socket.gethostname())
+    except:
+        return "unknown"
+
+MY_IP = get_my_ip()
+
+def load_json(path):
+    if os.path.exists(path):
+        try:
+            with open(path, "r") as f:
+                return json.load(f)
+        except:
+            pass
+    return []
+
+def save_json(path, data):
+    with open(path, "w") as f:
+        json.dump(data, f, indent=2)
+
+def is_banned(ip):
+    return ip in load_json(BAN_FILE)
+
+def log_access(ip, question, answer):
+    logs = load_json(LOG_FILE)
+    logs.append({
+        "ip": ip,
+        "time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "question": question[:100],
+        "answer": answer[:100]
+    })
+    save_json(LOG_FILE, logs)
+
+DEFAULT_SETTINGS = {
+    "keybind_screenshot": "F9",
+    "keybind_solve": "F10",
+}
+
+def load_settings():
+    if os.path.exists(SETTINGS_FILE):
+        try:
+            with open(SETTINGS_FILE, "r") as f:
+                s = json.load(f)
+                # Fill in any missing keys with defaults
+                for k, v in DEFAULT_SETTINGS.items():
+                    if k not in s:
+                        s[k] = v
+                return s
+        except:
+            pass
+    return DEFAULT_SETTINGS.copy()
+
+def save_settings(settings):
+    with open(SETTINGS_FILE, "w") as f:
+        json.dump(settings, f, indent=2)
+
+
+def call_ai(question, system_prompt=None, on_result=None, on_error=None):
+    if system_prompt is None:
+        system_prompt = (
+            "You are a quiz and homework solver. Give a clear direct answer first, "
+            "then briefly explain the reasoning. If multiple choice, identify the correct "
+            "option and explain why. Be concise."
+        )
+    payload = json.dumps({
+        "contents": [{"role": "user", "parts": [{"text": system_prompt + "\n\n" + question}]}]
+    }).encode("utf-8")
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={API_KEY}"
+    req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"}, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            text = data["candidates"][0]["content"]["parts"][0]["text"]
+            if on_result: on_result(text)
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8")
+        try: msg = json.loads(body)["error"]["message"]
+        except: msg = body
+        if on_error: on_error(msg)
+    except Exception as e:
+        if on_error: on_error(str(e))
+
+
+def call_ai_with_image(image_b64, on_result=None, on_error=None):
+    payload = json.dumps({
+        "contents": [{"role": "user", "parts": [
+            {"inline_data": {"mime_type": "image/png", "data": image_b64}},
+            {"text": "Look at this screenshot. Extract all questions you can see and solve each one. "
+                     "For each question give the answer and a brief explanation. "
+                     "Number them clearly. If there are no questions just describe what you see."}
+        ]}]
+    }).encode("utf-8")
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={API_KEY}"
+    req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"}, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            text = data["candidates"][0]["content"]["parts"][0]["text"]
+            if on_result: on_result(text)
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8")
+        try: msg = json.loads(body)["error"]["message"]
+        except: msg = body
+        if on_error: on_error(msg)
+    except Exception as e:
+        if on_error: on_error(str(e))
+
+
+def take_screenshot():
+    try:
+        import PIL.ImageGrab as ImageGrab
+        import io
+        img = ImageGrab.grab()
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        return base64.b64encode(buf.getvalue()).decode("utf-8")
+    except ImportError:
+        pass
+    return None
+
+
+# ── Admin ─────────────────────────────────────────────────────────────────────
+
+class AdminLogin(tk.Toplevel):
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.title("Admin Login")
+        self.geometry("300x160")
+        self.resizable(False, False)
+        self.configure(bg="#ffffff")
+        self.grab_set()
+        tk.Label(self, text="Admin Password", font=("Arial", 10, "bold"), bg="#ffffff").pack(pady=(20, 6))
+        self.pw_var = tk.StringVar()
+        entry = tk.Entry(self, textvariable=self.pw_var, show="•", font=("Arial", 11), relief="solid", bd=1, width=24)
+        entry.pack(ipady=5)
+        entry.bind("<Return>", lambda e: self._login())
+        self.err = tk.Label(self, text="", fg="red", bg="#ffffff", font=("Arial", 9))
+        self.err.pack()
+        tk.Button(self, text="Login", command=self._login, bg="#000000", fg="#ffffff",
+                  font=("Arial", 10, "bold"), relief="flat", padx=16, pady=6).pack(pady=8)
+
+    def _login(self):
+        if self.pw_var.get() == ADMIN_PASSWORD:
+            self.destroy()
+            AdminDashboard(self.master)
+        else:
+            self.err.config(text="Wrong password.")
+            self.pw_var.set("")
+
+
+class AdminDashboard(tk.Toplevel):
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.title("Admin Dashboard")
+        self.geometry("700x500")
+        self.configure(bg="#ffffff")
+        tk.Label(self, text="Admin Dashboard", font=("Arial", 14, "bold"), bg="#ffffff").pack(pady=(16, 0))
+        nb = ttk.Notebook(self)
+        nb.pack(fill="both", expand=True, padx=16, pady=12)
+        log_frame = tk.Frame(nb, bg="#ffffff")
+        nb.add(log_frame, text="  Access Logs  ")
+        self._build_logs(log_frame)
+        ban_frame = tk.Frame(nb, bg="#ffffff")
+        nb.add(ban_frame, text="  Banned IPs  ")
+        self._build_bans(ban_frame)
+
+    def _build_logs(self, parent):
+        cols = ("Time", "IP", "Question")
+        tree = ttk.Treeview(parent, columns=cols, show="headings", height=14)
+        for c in cols: tree.heading(c, text=c)
+        tree.column("Time", width=140); tree.column("IP", width=120); tree.column("Question", width=380)
+        tree.pack(fill="both", expand=True, padx=10, pady=(10, 0))
+        self.log_tree = tree
+        self._refresh_logs()
+        btn_frame = tk.Frame(parent, bg="#ffffff")
+        btn_frame.pack(fill="x", padx=10, pady=8)
+        tk.Button(btn_frame, text="Refresh", command=self._refresh_logs,
+                  bg="#ffffff", fg="#000", relief="solid", bd=1, font=("Arial", 9), padx=10, pady=4).pack(side="left")
+        tk.Button(btn_frame, text="Ban Selected IP", command=lambda: self._ban_from_log(tree),
+                  bg="#000000", fg="#ffffff", relief="flat", font=("Arial", 9, "bold"), padx=10, pady=4).pack(side="left", padx=(8, 0))
+
+    def _refresh_logs(self):
+        self.log_tree.delete(*self.log_tree.get_children())
+        for entry in reversed(load_json(LOG_FILE)[-200:]):
+            self.log_tree.insert("", "end", values=(entry.get("time",""), entry.get("ip",""), entry.get("question","")))
+
+    def _ban_from_log(self, tree):
+        selected = tree.selection()
+        if not selected: messagebox.showinfo("Select", "Select a log entry first."); return
+        ip = tree.item(selected[0])["values"][1]
+        self._do_ban(ip)
+
+    def _build_bans(self, parent):
+        self.ban_listbox = tk.Listbox(parent, font=("Arial", 11), relief="solid", bd=1)
+        self.ban_listbox.pack(fill="both", expand=True, padx=10, pady=(10, 0))
+        self._refresh_bans()
+        btn_frame = tk.Frame(parent, bg="#ffffff")
+        btn_frame.pack(fill="x", padx=10, pady=8)
+        ip_var = tk.StringVar()
+        tk.Entry(btn_frame, textvariable=ip_var, font=("Arial", 10), relief="solid", bd=1, width=20).pack(side="left", ipady=4)
+        tk.Button(btn_frame, text="Ban IP", command=lambda: self._do_ban(ip_var.get().strip()),
+                  bg="#000000", fg="#ffffff", relief="flat", font=("Arial", 9, "bold"), padx=10, pady=4).pack(side="left", padx=(6,0))
+        tk.Button(btn_frame, text="Unban Selected", command=self._unban_selected,
+                  bg="#ffffff", fg="#000", relief="solid", bd=1, font=("Arial", 9), padx=10, pady=4).pack(side="left", padx=(6,0))
+
+    def _refresh_bans(self):
+        self.ban_listbox.delete(0, tk.END)
+        for ip in load_json(BAN_FILE): self.ban_listbox.insert(tk.END, ip)
+
+    def _do_ban(self, ip):
+        if not ip: return
+        banned = load_json(BAN_FILE)
+        if ip not in banned: banned.append(ip); save_json(BAN_FILE, banned)
+        messagebox.showinfo("Banned", f"{ip} has been banned.")
+        self._refresh_bans()
+
+    def _unban_selected(self):
+        sel = self.ban_listbox.curselection()
+        if not sel: messagebox.showinfo("Select", "Select an IP to unban."); return
+        ip = self.ban_listbox.get(sel[0])
+        banned = load_json(BAN_FILE)
+        if ip in banned: banned.remove(ip); save_json(BAN_FILE, banned)
+        self._refresh_bans()
+        messagebox.showinfo("Unbanned", f"{ip} has been unbanned.")
+
+
+# ── Main App ──────────────────────────────────────────────────────────────────
+
+class QuizSolverApp(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title("Quiz Solver")
+        self.geometry("720x640")
+        self.minsize(500, 400)
+        self.configure(bg="#ffffff")
+        self.extracted_questions = []
+        self.settings = load_settings()
+        self._registered_keybinds = []
+
+        if is_banned(MY_IP):
+            messagebox.showerror("Access Denied", "You have been banned.")
+            self.destroy()
+            return
+
+        self._build_ui()
+        self._register_keybinds()
+
+    def _register_keybinds(self):
+        # Unbind old ones
+        for kb in self._registered_keybinds:
+            try: self.unbind_all(f"<{kb}>")
+            except: pass
+        self._registered_keybinds = []
+
+        kb_ss = self.settings.get("keybind_screenshot", "F9")
+        kb_solve = self.settings.get("keybind_solve", "F10")
+
+        try:
+            self.bind_all(f"<{kb_ss}>", lambda e: self.capture_screen())
+            self._registered_keybinds.append(kb_ss)
+        except: pass
+
+        try:
+            self.bind_all(f"<{kb_solve}>", lambda e: self.solve_manual())
+            self._registered_keybinds.append(kb_solve)
+        except: pass
+
+    def _build_ui(self):
+        top = tk.Frame(self, bg="#ffffff")
+        top.pack(fill="x", padx=16, pady=(10, 0))
+        tk.Label(top, text="Quiz Solver", font=("Arial", 13, "bold"), bg="#ffffff").pack(side="left")
+        tk.Button(top, text="Admin", command=lambda: AdminLogin(self),
+                  bg="#ffffff", fg="#000", relief="solid", bd=1, font=("Arial", 9), padx=10, pady=3).pack(side="right")
+
+        self.notebook = ttk.Notebook(self)
+        style = ttk.Style()
+        style.theme_use("default")
+        style.configure("TNotebook", background="#ffffff", borderwidth=0)
+        style.configure("TNotebook.Tab", font=("Arial", 10), padding=[16, 8], background="#f0f0f0")
+        style.map("TNotebook.Tab", background=[("selected", "#ffffff")], foreground=[("selected", "#000000")])
+
+        self.manual_frame = tk.Frame(self.notebook, bg="#ffffff")
+        self.notebook.add(self.manual_frame, text="  Manual  ")
+        self._build_manual(self.manual_frame)
+
+        self.scan_frame = tk.Frame(self.notebook, bg="#ffffff")
+        self.notebook.add(self.scan_frame, text="  Auto-Scan  ")
+        self._build_scan(self.scan_frame)
+
+        self.screenshot_frame = tk.Frame(self.notebook, bg="#ffffff")
+        self.notebook.add(self.screenshot_frame, text="  Screenshot  ")
+        self._build_screenshot(self.screenshot_frame)
+
+        self.settings_frame = tk.Frame(self.notebook, bg="#ffffff")
+        self.notebook.add(self.settings_frame, text="  Settings  ")
+        self._build_settings(self.settings_frame)
+
+        self.notebook.pack(fill="both", expand=True, pady=(6, 0))
+
+    # ── Manual ────────────────────────────────────────────────────
+    def _build_manual(self, parent):
+        tk.Label(parent, text="Enter your question:", bg="#ffffff", font=("Arial", 10), anchor="w").pack(fill="x", padx=20, pady=(16, 4))
+        self.question_input = scrolledtext.ScrolledText(parent, height=6, font=("Arial", 11), wrap=tk.WORD, relief="solid", bd=1, bg="#ffffff")
+        self.question_input.pack(fill="x", padx=20, pady=(0, 10))
+        btn_frame = tk.Frame(parent, bg="#ffffff")
+        btn_frame.pack(fill="x", padx=20, pady=(0, 10))
+        self.solve_btn = tk.Button(btn_frame, text="Get Answer", command=self.solve_manual,
+                                    bg="#000000", fg="#ffffff", font=("Arial", 11, "bold"), relief="flat", padx=20, pady=8, cursor="hand2")
+        self.solve_btn.pack(side="left")
+        tk.Button(btn_frame, text="Copy Answer", command=self.copy_manual_answer,
+                  bg="#ffffff", fg="#000000", font=("Arial", 10), relief="solid", bd=1, padx=12, pady=7, cursor="hand2").pack(side="left", padx=(10, 0))
+        tk.Label(parent, text="Answer:", bg="#ffffff", font=("Arial", 10), anchor="w").pack(fill="x", padx=20, pady=(0, 4))
+        self.answer_output = scrolledtext.ScrolledText(parent, height=10, font=("Arial", 11), wrap=tk.WORD, relief="solid", bd=1, bg="#fafafa", state="disabled")
+        self.answer_output.pack(fill="both", expand=True, padx=20, pady=(0, 16))
+
+    def solve_manual(self):
+        q = self.question_input.get("1.0", tk.END).strip()
+        if not q: messagebox.showwarning("Empty", "Please enter a question first."); return
+        self.solve_btn.config(state="disabled", text="Solving...")
+        self._set_answer("Thinking...")
+        def run():
+            call_ai(q,
+                    on_result=lambda ans: self.after(0, lambda: self._on_manual_result(ans, q)),
+                    on_error=lambda err: self.after(0, lambda: self._on_manual_error(err)))
+        threading.Thread(target=run, daemon=True).start()
+
+    def _on_manual_result(self, ans, q):
+        self._set_answer(ans)
+        self.solve_btn.config(state="normal", text="Get Answer")
+        log_access(MY_IP, q, ans)
+
+    def _on_manual_error(self, err):
+        self._set_answer("Error: " + err)
+        self.solve_btn.config(state="normal", text="Get Answer")
+
+    def _set_answer(self, text):
+        self.answer_output.config(state="normal")
+        self.answer_output.delete("1.0", tk.END)
+        self.answer_output.insert(tk.END, text)
+        self.answer_output.config(state="disabled")
+
+    def copy_manual_answer(self):
+        text = self.answer_output.get("1.0", tk.END).strip()
+        if text: self.clipboard_clear(); self.clipboard_append(text)
+
+    # ── Auto-Scan ─────────────────────────────────────────────────
+    def _build_scan(self, parent):
+        top = tk.Frame(parent, bg="#ffffff")
+        top.pack(fill="x", padx=20, pady=(16, 0))
+        tk.Label(top, text="Paste quiz text here:", bg="#ffffff", font=("Arial", 10), anchor="w").pack(side="left")
+        tk.Button(top, text="Upload .txt", command=self.upload_file, bg="#ffffff", fg="#000000",
+                  font=("Arial", 9), relief="solid", bd=1, padx=10, pady=4, cursor="hand2").pack(side="right")
+        self.scan_input = scrolledtext.ScrolledText(parent, height=6, font=("Arial", 11), wrap=tk.WORD, relief="solid", bd=1, bg="#ffffff")
+        self.scan_input.pack(fill="x", padx=20, pady=(6, 10))
+        btn_frame = tk.Frame(parent, bg="#ffffff")
+        btn_frame.pack(fill="x", padx=20, pady=(0, 8))
+        self.extract_btn = tk.Button(btn_frame, text="Extract Questions", command=self.extract_only,
+                                      bg="#ffffff", fg="#000000", font=("Arial", 10), relief="solid", bd=1, padx=14, pady=7, cursor="hand2")
+        self.extract_btn.pack(side="left")
+        self.solve_all_btn = tk.Button(btn_frame, text="Solve All", command=self.solve_all,
+                                        bg="#000000", fg="#ffffff", font=("Arial", 10, "bold"), relief="flat", padx=14, pady=7, cursor="hand2")
+        self.solve_all_btn.pack(side="left", padx=(10, 0))
+        self.solve_selected_btn = tk.Button(btn_frame, text="Solve Selected", command=self.solve_selected,
+                                             bg="#ffffff", fg="#000000", font=("Arial", 10), relief="solid", bd=1, padx=14, pady=7, cursor="hand2")
+        self.solve_selected_btn.pack(side="left", padx=(10, 0))
+        self.progress_var = tk.DoubleVar()
+        ttk.Progressbar(parent, variable=self.progress_var, maximum=100).pack(fill="x", padx=20, pady=(0, 6))
+        self.scan_output = scrolledtext.ScrolledText(parent, height=12, font=("Arial", 11), wrap=tk.WORD, relief="solid", bd=1, bg="#fafafa")
+        self.scan_output.pack(fill="both", expand=True, padx=20, pady=(0, 6))
+        tk.Button(parent, text="Copy All Answers", command=self.copy_scan_answers,
+                  bg="#ffffff", fg="#000000", font=("Arial", 9), relief="solid", bd=1, padx=10, pady=4, cursor="hand2").pack(anchor="e", padx=20, pady=(0, 10))
+
+    def upload_file(self):
+        path = filedialog.askopenfilename(filetypes=[("Text files", "*.txt")])
+        if path:
+            with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                self.scan_input.delete("1.0", tk.END); self.scan_input.insert(tk.END, f.read())
+
+    def extract_only(self):
+        text = self.scan_input.get("1.0", tk.END).strip()
+        if not text: messagebox.showwarning("Empty", "Paste some text first."); return
+        self._scan_set_output("Detecting questions...")
+        self.extract_btn.config(state="disabled")
+        def run():
+            call_ai(f"Extract all questions from the following text. Return ONLY a JSON array of question strings, nothing else, no markdown:\n\n{text}",
+                    system_prompt="You are a question extractor. Return only a JSON array of question strings. No markdown, no explanation.",
+                    on_result=lambda r: self.after(0, lambda: self._on_extracted(r)),
+                    on_error=lambda e: self.after(0, lambda: self._scan_set_output("Error: " + e)))
+        threading.Thread(target=run, daemon=True).start()
+
+    def _on_extracted(self, result):
+        self.extract_btn.config(state="normal")
+        try: qs = json.loads(result.replace("```json","").replace("```","").strip())
+        except: qs = [l.strip() for l in result.split("\n") if l.strip() and ("?" in l or l[0].isdigit())]
+        self.extracted_questions = qs
+        if not qs: self._scan_set_output("No questions found."); return
+        out = f"Found {len(qs)} question(s).\n\n"
+        for i, q in enumerate(qs): out += f"Q{i+1}: {q}\n\n"
+        self._scan_set_output(out)
+
+    def solve_all(self):
+        text = self.scan_input.get("1.0", tk.END).strip()
+        if not text: messagebox.showwarning("Empty", "Paste some text first."); return
+        self._scan_set_output("Extracting questions...")
+        def run():
+            call_ai(f"Extract all questions from the following text. Return ONLY a JSON array of question strings, nothing else, no markdown:\n\n{text}",
+                    system_prompt="You are a question extractor. Return only a JSON array of question strings. No markdown, no explanation.",
+                    on_result=lambda r: self.after(0, lambda: self._solve_list_from_json(r)),
+                    on_error=lambda e: self.after(0, lambda: self._scan_set_output("Error: " + e)))
+        threading.Thread(target=run, daemon=True).start()
+
+    def _solve_list_from_json(self, result):
+        try: qs = json.loads(result.replace("```json","").replace("```","").strip())
+        except: qs = [l.strip() for l in result.split("\n") if l.strip() and ("?" in l or l[0].isdigit())]
+        if not qs: self._scan_set_output("No questions found."); return
+        self._run_solve_list(qs)
+
+    def solve_selected(self):
+        if not self.extracted_questions: messagebox.showinfo("Extract First", "Click 'Extract Questions' first."); return
+        sel = self._ask_selection()
+        if sel: self._run_solve_list(sel)
+
+    def _ask_selection(self):
+        win = tk.Toplevel(self)
+        win.title("Select Questions"); win.geometry("500x400"); win.configure(bg="#ffffff"); win.grab_set()
+        tk.Label(win, text="Select questions to solve:", bg="#ffffff", font=("Arial", 10, "bold")).pack(padx=16, pady=(12,6), anchor="w")
+        frame = tk.Frame(win, bg="#ffffff"); frame.pack(fill="both", expand=True, padx=16)
+        vars_ = []
+        for i, q in enumerate(self.extracted_questions):
+            var = tk.BooleanVar(value=True)
+            tk.Checkbutton(frame, text=f"Q{i+1}: {q[:80]}{'...' if len(q)>80 else ''}",
+                           variable=var, bg="#ffffff", anchor="w", font=("Arial", 9), wraplength=440).pack(fill="x", pady=2)
+            vars_.append((var, q))
+        selected = []
+        def confirm():
+            for var, q in vars_:
+                if var.get(): selected.append(q)
+            win.destroy()
+        tk.Button(win, text="Solve Selected", command=confirm, bg="#000000", fg="#ffffff",
+                  font=("Arial", 10, "bold"), relief="flat", padx=16, pady=8).pack(pady=12)
+        self.wait_window(win)
+        return selected
+
+    def _run_solve_list(self, qs):
+        self._scan_set_output(f"Solving {len(qs)} question(s)...\n\n")
+        self.progress_var.set(0)
+        self.solve_all_btn.config(state="disabled"); self.solve_selected_btn.config(state="disabled")
+        def run():
+            answers = []
+            for i, q in enumerate(qs):
+                result = {"q": q, "a": None, "err": None}
+                done = threading.Event()
+                def on_result(ans, r=result, d=done): r["a"] = ans; d.set()
+                def on_error(err, r=result, d=done): r["err"] = err; d.set()
+                call_ai(q, on_result=on_result, on_error=on_error)
+                done.wait()
+                answers.append(result)
+                self.after(0, lambda p=((i+1)/len(qs)*100): self.progress_var.set(p))
+            self.after(0, lambda: self._display_answers(answers))
+        threading.Thread(target=run, daemon=True).start()
+
+    def _display_answers(self, answers):
+        self.scan_output.config(state="normal"); self.scan_output.delete("1.0", tk.END)
+        for i, item in enumerate(answers):
+            self.scan_output.insert(tk.END, f"Q{i+1}: {item['q']}\n", "question")
+            if item["a"]: self.scan_output.insert(tk.END, f"{item['a']}\n\n"); log_access(MY_IP, item["q"], item["a"])
+            else: self.scan_output.insert(tk.END, f"Error: {item['err']}\n\n")
+        self.scan_output.tag_config("question", font=("Arial", 11, "bold"))
+        self.solve_all_btn.config(state="normal"); self.solve_selected_btn.config(state="normal")
+
+    def _scan_set_output(self, text):
+        self.scan_output.config(state="normal"); self.scan_output.delete("1.0", tk.END); self.scan_output.insert(tk.END, text)
+
+    def copy_scan_answers(self):
+        text = self.scan_output.get("1.0", tk.END).strip()
+        if text: self.clipboard_clear(); self.clipboard_append(text)
+
+    # ── Screenshot ────────────────────────────────────────────────
+    def _build_screenshot(self, parent):
+        tk.Label(parent, text="Screenshot Scanner", bg="#ffffff", font=("Arial", 11, "bold"), anchor="w").pack(fill="x", padx=20, pady=(16, 4))
+        tk.Label(parent, text="Take a screenshot of your screen and AI will find and solve all questions in it.",
+                 bg="#ffffff", font=("Arial", 9), fg="#555", anchor="w", wraplength=660).pack(fill="x", padx=20, pady=(0, 12))
+        btn_frame = tk.Frame(parent, bg="#ffffff")
+        btn_frame.pack(fill="x", padx=20, pady=(0, 10))
+        self.ss_btn = tk.Button(btn_frame, text="📸  Capture Screen Now", command=self.capture_screen,
+                                 bg="#000000", fg="#ffffff", font=("Arial", 11, "bold"), relief="flat", padx=20, pady=10, cursor="hand2")
+        self.ss_btn.pack(side="left")
+        tk.Button(btn_frame, text="Upload Image", command=self.upload_image,
+                  bg="#ffffff", fg="#000000", font=("Arial", 10), relief="solid", bd=1, padx=12, pady=8, cursor="hand2").pack(side="left", padx=(10,0))
+        tk.Button(btn_frame, text="Copy Answers", command=self.copy_ss_answers,
+                  bg="#ffffff", fg="#000000", font=("Arial", 10), relief="solid", bd=1, padx=12, pady=8, cursor="hand2").pack(side="left", padx=(10,0))
+        self.ss_status = tk.Label(parent, text="", bg="#ffffff", font=("Arial", 9), fg="#555", anchor="w")
+        self.ss_status.pack(fill="x", padx=20)
+        tk.Label(parent, text="Answers:", bg="#ffffff", font=("Arial", 10), anchor="w").pack(fill="x", padx=20, pady=(8,4))
+        self.ss_output = scrolledtext.ScrolledText(parent, height=16, font=("Arial", 11), wrap=tk.WORD, relief="solid", bd=1, bg="#fafafa")
+        self.ss_output.pack(fill="both", expand=True, padx=20, pady=(0, 16))
+
+    def capture_screen(self):
+        self.iconify()
+        self.after(500, self._do_capture)
+
+    def _do_capture(self):
+        self.ss_status.config(text="Capturing screen...")
+        self.ss_btn.config(state="disabled", text="Capturing...")
+        self.deiconify()
+        def run():
+            img_b64 = take_screenshot()
+            if not img_b64:
+                self.after(0, lambda: self._on_ss_error("Could not capture. Run: pip install pillow"))
+                return
+            self.after(0, lambda: self.ss_status.config(text="Analyzing with AI..."))
+            call_ai_with_image(img_b64,
+                               on_result=lambda r: self.after(0, lambda: self._on_ss_result(r)),
+                               on_error=lambda e: self.after(0, lambda: self._on_ss_error(e)))
+        threading.Thread(target=run, daemon=True).start()
+
+    def upload_image(self):
+        path = filedialog.askopenfilename(filetypes=[("Image files", "*.png *.jpg *.jpeg *.bmp")])
+        if not path: return
+        self.ss_status.config(text="Reading image...")
+        self.ss_btn.config(state="disabled")
+        def run():
+            try:
+                with open(path, "rb") as f: raw = f.read()
+                img_b64 = base64.b64encode(raw).decode("utf-8")
+                self.after(0, lambda: self.ss_status.config(text="Analyzing image with AI..."))
+                call_ai_with_image(img_b64,
+                                   on_result=lambda r: self.after(0, lambda: self._on_ss_result(r)),
+                                   on_error=lambda e: self.after(0, lambda: self._on_ss_error(e)))
+            except Exception as e:
+                self.after(0, lambda: self._on_ss_error(str(e)))
+        threading.Thread(target=run, daemon=True).start()
+
+    def _on_ss_result(self, text):
+        self.ss_output.config(state="normal"); self.ss_output.delete("1.0", tk.END); self.ss_output.insert(tk.END, text)
+        self.ss_status.config(text="Done!")
+        self.ss_btn.config(state="normal", text="📸  Capture Screen Now")
+        log_access(MY_IP, "[screenshot]", text[:100])
+
+    def _on_ss_error(self, err):
+        self.ss_output.config(state="normal"); self.ss_output.delete("1.0", tk.END); self.ss_output.insert(tk.END, "Error: " + err)
+        self.ss_status.config(text="Error.")
+        self.ss_btn.config(state="normal", text="📸  Capture Screen Now")
+
+    def copy_ss_answers(self):
+        text = self.ss_output.get("1.0", tk.END).strip()
+        if text: self.clipboard_clear(); self.clipboard_append(text)
+
+    # ── Settings ──────────────────────────────────────────────────
+    def _build_settings(self, parent):
+        tk.Label(parent, text="Settings", bg="#ffffff", font=("Arial", 11, "bold"), anchor="w").pack(fill="x", padx=20, pady=(16, 4))
+
+        tk.Label(parent, text="Keybinds", bg="#ffffff", font=("Arial", 10, "bold"), anchor="w").pack(fill="x", padx=20, pady=(12, 6))
+        tk.Label(parent, text="Click a field and press any key to set the keybind.",
+                 bg="#ffffff", font=("Arial", 9), fg="#555", anchor="w").pack(fill="x", padx=20, pady=(0, 12))
+
+        # Screenshot keybind
+        row1 = tk.Frame(parent, bg="#ffffff")
+        row1.pack(fill="x", padx=20, pady=(0, 10))
+        tk.Label(row1, text="Capture Screenshot:", bg="#ffffff", font=("Arial", 10), width=22, anchor="w").pack(side="left")
+        self.kb_ss_var = tk.StringVar(value=self.settings.get("keybind_screenshot", "F9"))
+        kb_ss_entry = tk.Entry(row1, textvariable=self.kb_ss_var, font=("Arial", 10), relief="solid", bd=1, width=12)
+        kb_ss_entry.pack(side="left")
+        kb_ss_entry.bind("<FocusIn>", lambda e: kb_ss_entry.delete(0, tk.END))
+        kb_ss_entry.bind("<KeyPress>", lambda e: self._capture_key(e, self.kb_ss_var, kb_ss_entry))
+
+        # Solve keybind
+        row2 = tk.Frame(parent, bg="#ffffff")
+        row2.pack(fill="x", padx=20, pady=(0, 10))
+        tk.Label(row2, text="Solve (Manual tab):", bg="#ffffff", font=("Arial", 10), width=22, anchor="w").pack(side="left")
+        self.kb_solve_var = tk.StringVar(value=self.settings.get("keybind_solve", "F10"))
+        kb_solve_entry = tk.Entry(row2, textvariable=self.kb_solve_var, font=("Arial", 10), relief="solid", bd=1, width=12)
+        kb_solve_entry.pack(side="left")
+        kb_solve_entry.bind("<FocusIn>", lambda e: kb_solve_entry.delete(0, tk.END))
+        kb_solve_entry.bind("<KeyPress>", lambda e: self._capture_key(e, self.kb_solve_var, kb_solve_entry))
+
+        tk.Button(parent, text="Save Settings", command=self._save_settings,
+                  bg="#000000", fg="#ffffff", font=("Arial", 11, "bold"),
+                  relief="flat", padx=20, pady=8, cursor="hand2").pack(anchor="w", padx=20, pady=(16, 0))
+
+        self.settings_status = tk.Label(parent, text="", bg="#ffffff", font=("Arial", 9), fg="green", anchor="w")
+        self.settings_status.pack(fill="x", padx=20, pady=(6, 0))
+
+        # Current keybinds display
+        tk.Label(parent, text="Current Active Keybinds", bg="#ffffff", font=("Arial", 10, "bold"), anchor="w").pack(fill="x", padx=20, pady=(24, 6))
+        self.kb_display = tk.Label(parent, text=self._keybind_display_text(),
+                                    bg="#fafafa", font=("Arial", 10), anchor="w",
+                                    relief="solid", bd=1, justify="left", padx=12, pady=10)
+        self.kb_display.pack(fill="x", padx=20)
+
+    def _capture_key(self, event, var, entry):
+        key = event.keysym
+        if key in ("Tab", "Escape"): return
+        var.set(key)
+        entry.delete(0, tk.END)
+        entry.insert(0, key)
+        return "break"
+
+    def _save_settings(self):
+        self.settings["keybind_screenshot"] = self.kb_ss_var.get().strip() or "F9"
+        self.settings["keybind_solve"] = self.kb_solve_var.get().strip() or "F10"
+        save_settings(self.settings)
+        self._register_keybinds()
+        self.kb_display.config(text=self._keybind_display_text())
+        self.settings_status.config(text="✓ Settings saved!")
+        self.after(2000, lambda: self.settings_status.config(text=""))
+
+    def _keybind_display_text(self):
+        ss = self.settings.get("keybind_screenshot", "F9")
+        sv = self.settings.get("keybind_solve", "F10")
+        return f"  Capture Screenshot:   {ss}\n  Solve (Manual tab):   {sv}"
+
+
+if __name__ == "__main__":
+    app = QuizSolverApp()
+    app.mainloop()
